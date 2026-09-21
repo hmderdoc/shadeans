@@ -121,31 +121,51 @@ impl Region {
     }
 }
 
+/// How many of a region's pixels are closest to each palette colour.
+type Support = [f32; 16];
+
 struct CellStats {
     all: Region,
     /// Pixels under each structural glyph's mask, in `STRUCTURAL` order.
     under: [Region; 4],
+    all_support: Support,
+    under_support: [Support; 4],
 }
 
-fn cell_stats(src: &Source, cx: usize, cy: usize) -> CellStats {
+fn nearest_palette_index(pal: &Palette, p: V3) -> usize {
+    (0..16)
+        .min_by(|&a, &b| dist2(pal.lab[a], p).total_cmp(&dist2(pal.lab[b], p)))
+        .unwrap()
+}
+
+fn cell_stats(src: &Source, pal: &Palette, cx: usize, cy: usize) -> CellStats {
     let mut stats = CellStats {
         all: Region::default(),
         under: [Region::default(); 4],
+        all_support: [0.0; 16],
+        under_support: [[0.0; 16]; 4],
     };
     for y in 0..CELL_H {
         let row = (cy * CELL_H + y) * src.width + cx * CELL_W;
         for x in 0..CELL_W {
             let p = src.lab[row + x];
+            let nearest = nearest_palette_index(pal, p);
             stats.all.add(p);
+            stats.all_support[nearest] += 1.0;
             for (g, &ch) in STRUCTURAL.iter().enumerate() {
                 if font::pixel_is_fg(ch, x, y) {
                     stats.under[g].add(p);
+                    stats.under_support[g][nearest] += 1.0;
                 }
             }
         }
     }
     stats
 }
+
+/// Share of a half block's pixels that must be closest to a palette colour
+/// before that half may be painted with it.
+const MIN_HALF_SUPPORT: f32 = 0.2;
 
 /// Shade mixes are fixed per palette, so build them once.
 struct ShadeTable {
@@ -229,14 +249,30 @@ fn best_cell(
     for (g, &ch) in STRUCTURAL.iter().enumerate() {
         let under = stats.under[g];
         let over = stats.all.minus(under);
-        let pick = |region: &Region, count: usize| {
+        let under_support = stats.under_support[g];
+        let mut over_support = stats.all_support;
+        for (o, u) in over_support.iter_mut().zip(under_support) {
+            *o -= u;
+        }
+        // A half block is structure, so each half may only be painted a colour
+        // that a real share of its pixels are closest to. Where an ink line
+        // crosses a half, the *mean* of ink and fill is a mid-tone nothing in
+        // the picture has, and its nearest palette colour is a stray blue or
+        // brown. An artist paints such a half the fill colour or black.
+        let pick = |region: &Region, support: &Support, count: usize| {
+            let needed = MIN_HALF_SUPPORT * region.n;
+            let supported = |k: &usize| support[*k] >= needed;
+            let cost = |k: usize| (k, region.cost(pal.lab[k]) + penalty[k]);
             (0..count)
-                .map(|k| (k, region.cost(pal.lab[k]) + penalty[k]))
+                .filter(supported)
+                .map(cost)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
-                .unwrap()
+                // Nothing allowed is well supported (e.g. a white half that
+                // cannot be a background without iCE): fall back to the mean.
+                .unwrap_or_else(|| (0..count).map(cost).min_by(|a, b| a.1.total_cmp(&b.1)).unwrap())
         };
-        let (f, f_cost) = pick(&under, 16);
-        let (b, b_cost) = pick(&over, bg_count);
+        let (f, f_cost) = pick(&under, &under_support, 16);
+        let (b, b_cost) = pick(&over, &over_support, bg_count);
         if f != b && f_cost + b_cost < best_cost {
             best_cost = f_cost + b_cost;
             best = Cell { ch, fg: f as u8, bg: b as u8, rgb: None };
@@ -309,7 +345,7 @@ fn best_cell_truecolor(stats: &CellStats, pal: &Palette, opts: &Options) -> Cell
 pub fn convert(src: &Source, cols: usize, rows: usize, pal: &Palette, opts: &Options) -> Vec<Cell> {
     let shades = ShadeTable::new(pal);
     let stats: Vec<CellStats> = (0..rows * cols)
-        .map(|i| cell_stats(src, i % cols, i / cols))
+        .map(|i| cell_stats(src, pal, i % cols, i / cols))
         .collect();
 
     if opts.truecolor {

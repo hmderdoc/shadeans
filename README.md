@@ -50,6 +50,9 @@ full path of every file written is printed.
 | `--saturation <f>` | 1.0 | colour strength of the source |
 | `--smooth <n>` | 0 | edge-preserving smoothing passes on the source |
 | `--no-levels` | | don't stretch the source to the full black-to-white range |
+| `--auto-chroma <f>` | 0.16 | lifts muted colours so they land on real palette colours instead of grey. 0 = off |
+| `--local-contrast <f>` | 0.5 | pushes shapes away from their surroundings in lightness. 0 = off |
+| `--equalize <f>` | 0 | spreads bunched-up tones apart, 0..1. Try 0.4 on dim, murky pictures; can darken faces in mostly-bright ones |
 | `--no-sauce` | | leave off the SAUCE record |
 | `--title/--author/--group <text>` | | SAUCE fields (title defaults to the image name) |
 | `--force-newlines` | | CRLF after every row, see below |
@@ -89,6 +92,15 @@ shadeans only ever uses the shade, half-block and full-block characters.
 of the finished ANSI drawn with the VGA font, and the prepared source the
 matcher saw.
 
+### Muted pictures
+
+The VGA palette has no muted colours: everything that isn't a grey is vivid. A
+soft green or a grey-brown is nearer to dark grey than to any real colour, so
+without help a misty forest and the character standing in it both come out as
+the same grey. `--auto-chroma` and `--local-contrast` are on by default in
+16-colour mode to counter that, and are off with `--truecolor`, where colours
+should stay exact.
+
 ## How it works
 
 The source is resized in linear light to exactly 8x16 pixels per cell and
@@ -108,7 +120,11 @@ few milliseconds.
   way ramps are drawn by hand, over loud pairs such as blue on red.
 * **Half blocks.** Scored against the real font shapes (`▄` is 9 of 16 rows,
   not 8). Foreground and background separate, so the best of each is found
-  independently.
+  independently. Each half may only be painted a colour that at least a fifth
+  of its pixels are closest to. Where an ink line crosses a half, the average
+  of ink and fill is a mid-tone the picture doesn't contain, and matching that
+  average produces stray blue or brown blocks along outlines; this rule makes
+  the half the fill colour or black instead, as an artist would.
 
 A coherence pass then re-chooses each cell with a penalty for using colours its
 four neighbours don't, weighted by how similar the source is across that
