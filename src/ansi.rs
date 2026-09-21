@@ -56,7 +56,38 @@ fn write_sgr(out: &mut Vec<u8>, cur: &mut Attr, want: &Attr) {
     cur.bg = want.bg;
 }
 
+/// Truecolor attribute change, in the form gif2ans writes and PabloDraw-style
+/// viewers read: a complete 16-colour SGR first, as the fallback for viewers
+/// that ignore 24-bit colour, then `ESC[0;R;G;Bt` (background) and
+/// `ESC[1;R;G;Bt` (foreground) to override it.
+fn write_truecolor(out: &mut Vec<u8>, cell: &Cell, fg: [u8; 3], bg: [u8; 3]) {
+    let mut seq = String::from("\x1b[0;");
+    if cell.bg >= 8 {
+        seq.push_str("5;");
+    }
+    seq.push_str(&format!("4{};", DOS_TO_SGR[(cell.bg & 7) as usize]));
+    if cell.fg >= 8 {
+        seq.push_str("1;");
+    }
+    seq.push_str(&format!("3{}m", DOS_TO_SGR[(cell.fg & 7) as usize]));
+    // A space shows no foreground and a full block no background.
+    if cell.ch != font::FULL_BLOCK {
+        seq.push_str(&format!("\x1b[0;{};{};{}t", bg[0], bg[1], bg[2]));
+    }
+    if cell.ch != font::SPACE {
+        seq.push_str(&format!("\x1b[1;{};{};{}t", fg[0], fg[1], fg[2]));
+    }
+    out.extend_from_slice(seq.as_bytes());
+}
+
 fn is_blank(cell: &Cell) -> bool {
+    if let Some((fg, bg)) = cell.rgb {
+        return match cell.ch {
+            font::SPACE => bg == [0; 3],
+            font::FULL_BLOCK => fg == [0; 3],
+            _ => fg == [0; 3] && bg == [0; 3],
+        };
+    }
     match cell.ch {
         font::SPACE => cell.bg == 0,
         font::FULL_BLOCK => cell.fg == 0,
@@ -68,12 +99,25 @@ pub fn encode(cells: &[Cell], cols: usize, rows: usize, force_newlines: bool) ->
     let mut out = Vec::new();
     out.extend_from_slice(b"\x1b[0m");
     let mut cur = RESET;
+    // Last cell written in truecolor mode; its colours are still in force.
+    let mut cur_true: Option<Cell> = None;
 
     for cy in 0..rows {
         let row = &cells[cy * cols..(cy + 1) * cols];
         let used = row.iter().rposition(|c| !is_blank(c)).map_or(0, |i| i + 1);
 
         for cell in &row[..used] {
+            if let Some((fg, bg)) = cell.rgb {
+                let unchanged = cur_true.is_some_and(|prev| {
+                    prev.ch == cell.ch && prev.rgb == cell.rgb && prev.fg == cell.fg && prev.bg == cell.bg
+                });
+                if !unchanged {
+                    write_truecolor(&mut out, cell, fg, bg);
+                    cur_true = Some(*cell);
+                }
+                out.push(cell.ch);
+                continue;
+            }
             // A space shows no foreground and a full block no background, so
             // leave that half of the attribute alone and save the bytes.
             let want = match cell.ch {
@@ -88,8 +132,13 @@ pub fn encode(cells: &[Cell], cols: usize, rows: usize, force_newlines: bool) ->
         // A full 80-column row wraps by itself in ANSI viewers; a newline there
         // would double-space the art.
         if used < cols || cols != 80 || force_newlines {
-            let black_bg = Attr { fg: cur.fg, bg: 0 };
-            write_sgr(&mut out, &mut cur, &black_bg);
+            if cur_true.take().is_some() {
+                // Drop the 24-bit colours so the line break can't smear them.
+                out.extend_from_slice(b"\x1b[0m");
+            } else {
+                let black_bg = Attr { fg: cur.fg, bg: 0 };
+                write_sgr(&mut out, &mut cur, &black_bg);
+            }
             out.extend_from_slice(b"\r\n");
         }
     }

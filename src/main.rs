@@ -30,13 +30,21 @@ output
       --force-newlines     CRLF after every row, even full 80-column rows
 
 size
-  -c, --cols <n>           columns (default 80)
-  -r, --rows <n>           rows (default: keep the image's aspect ratio)
+  -c, --cols <n>           columns (default 80); --columns also works
+      --rows <n>           rows (default: keep the image's aspect ratio)
 
-look
+colour
+  -t, --truecolor          24-bit colour. Written the way gif2ans does it: a
+                           16-colour code per cell as the fallback, then
+                           ESC[0;R;G;Bt / ESC[1;R;G;Bt for viewers that read
+                           them (SyncTERM, PabloDraw, ansilove, Moebius).
+                           Shading is not needed with exact colours, so
+                           --lambda, --coherence and --blocks have no effect.
+      --ice                iCE colours: 16 background colours, no blink
+
+look (16-colour mode)
       --lambda <f>         how visible dither texture is, 0..1 (default 0.10)
                            1 = pixel art, lower = more and bolder shading
-      --ice                iCE colours: 16 background colours, no blink
       --blocks             pixel-art baseline: no shade glyphs
       --coherence <f>      pull neighbouring cells onto shared colours
                            (default 0.002, 0 = off, 0.006 = flat)
@@ -48,6 +56,11 @@ source prep
       --smooth <n>         edge-preserving smoothing passes (default 0)
       --no-levels          don't auto-stretch lightness to the full range
 
+gif2ans compatibility
+  -i, --image              also write a picture of the result to OUTPUT.ans.png
+  -r, --restrict           accepted and ignored: shadeans only ever uses the
+                           shade, half-block and full-block characters
+
 debugging (not needed for normal use)
       --preview <file.png> write a picture of the finished ANSI in the VGA font
       --src-png <file.png> write the prepared source the matcher saw
@@ -57,6 +70,7 @@ struct Args {
     input: String,
     out: Option<String>,
     png: Option<String>,
+    image: bool,
     src_png: Option<String>,
     sauce: bool,
     title: Option<String>,
@@ -74,6 +88,7 @@ fn parse_args() -> Result<Args, String> {
         input: String::new(),
         out: None,
         png: None,
+        image: false,
         src_png: None,
         sauce: true,
         title: None,
@@ -88,6 +103,7 @@ fn parse_args() -> Result<Args, String> {
             glyphs: convert::GlyphSet::Shaded,
             coherence: 0.002,
             sweeps: 4,
+            truecolor: false,
         },
         prep: source::Prep {
             auto_levels: true,
@@ -113,8 +129,11 @@ fn parse_args() -> Result<Args, String> {
             "--author" => args.author = value("--author")?,
             "--group" => args.group = value("--group")?,
             "--force-newlines" => args.force_newlines = true,
-            "-c" | "--cols" => args.cols = num("--cols", value("--cols")?)?,
-            "-r" | "--rows" => args.rows = Some(num("--rows", value("--rows")?)?),
+            "-c" | "--cols" | "--columns" => args.cols = num("--cols", value("--cols")?)?,
+            "--rows" => args.rows = Some(num("--rows", value("--rows")?)?),
+            "-t" | "--truecolor" => args.opts.truecolor = true,
+            "-i" | "--image" => args.image = true,
+            "-r" | "--restrict" => {}
             "--lambda" => args.opts.lambda = num("--lambda", value("--lambda")?)?,
             "--ice" => args.opts.ice = true,
             "--blocks" => args.opts.glyphs = convert::GlyphSet::Blocks,
@@ -218,6 +237,13 @@ fn run(args: Args) -> Result<(), String> {
     });
     std::fs::write(&out_path, &data).map_err(|e| format!("cannot write {out_path}: {e}"))?;
     let mut written = vec![out_path.clone()];
+    if args.image {
+        let path = std::path::Path::new(&out_path).with_extension("ans.png");
+        render::to_rgb_image(&cells, cols, rows)
+            .save(&path)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        written.push(path.to_string_lossy().into_owned());
+    }
 
     if let Some(path) = &args.png {
         render::to_rgb_image(&cells, cols, rows)

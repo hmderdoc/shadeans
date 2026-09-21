@@ -9,7 +9,8 @@ characters `░▒▓`, which blend a foreground and background colour at 25%, 5
 and 75%. That turns the 16-colour palette into a few hundred usable tones, and
 half blocks are still used where the picture has a real edge.
 
-Output is 16-colour CP437 `.ANS` with a SAUCE record.
+Output is CP437 `.ANS` with a SAUCE record, in 16 colours or, with `-t`, in
+24-bit colour.
 
 ## Build
 
@@ -37,8 +38,9 @@ full path of every file written is printed.
 
 | option | default | what it does |
 | --- | --- | --- |
-| `-c, --cols <n>` | 80 | width in columns |
-| `-r, --rows <n>` | from aspect ratio | height in rows |
+| `-c, --cols <n>` | 80 | width in columns (`--columns` also works) |
+| `--rows <n>` | from aspect ratio | height in rows |
+| `-t, --truecolor` | off | 24-bit colour, see below |
 | `--ice` | off | iCE colours: 16 background colours instead of 8, no blink |
 | `--lambda <f>` | 0.10 | how visible dither texture is. 1 = pixel art; lower = more and bolder shading |
 | `--coherence <f>` | 0.002 | pulls neighbouring cells onto shared colours. 0 = off, 0.006 = flat |
@@ -54,6 +56,30 @@ full path of every file written is printed.
 
 Full-width 80-column rows are written without a newline, as ANSI viewers wrap
 them on their own. Rows that end in black are trimmed and end with CRLF.
+
+### Truecolor
+
+`-t` writes 24-bit colour the same way [gif2ans](https://github.com/andyherbert/gif2ans)
+does: every colour change is a complete 16-colour code followed by
+`ESC[0;R;G;Bt` (background) and `ESC[1;R;G;Bt` (foreground). Viewers that read
+those sequences (SyncTERM, PabloDraw, ansilove, Moebius) show the exact
+colours; anything else shows the nearest 16-colour version of the same
+characters. These are not the `38;2` codes of xterm-style terminals.
+
+With exact colours there is nothing to shade: any blend of two colours is
+available as a solid, without the dither pattern. So each cell is either a
+solid in its mean colour, or a half block in the mean colours of its two halves
+where that removes enough error to be a visible edge. `--lambda`, `--coherence`
+and `--blocks` have no effect. Files are much larger (around 100-170 KB for an
+80-column picture) because nearly every cell has its own colours.
+
+### Coming from gif2ans
+
+The command line is the same shape, `shadeans INPUT OUTPUT`, and `-c`,
+`--columns`, `-t` and `-i` (writes a picture of the result to `OUTPUT.ans.png`)
+mean the same thing. `-r`/`--restrict` is accepted and ignored, because
+shadeans only ever uses the shade, half-block and full-block characters.
+`-v`/`--vga50` (8x8 font) is not supported.
 
 `--preview <file.png>` and `--src-png <file.png>` are debugging aids: a picture
 of the finished ANSI drawn with the VGA font, and the prepared source the

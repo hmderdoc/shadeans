@@ -21,16 +21,27 @@
 //! An optional coherence pass then re-chooses each cell with a penalty for
 //! introducing colours its similar-looking neighbours don't use, so a region
 //! settles on one ramp instead of flipping pairs cell to cell.
+//!
+//! **Truecolor** is a different problem. Any mix of two colours is available
+//! directly as a solid, without the dither texture, so shades can never win
+//! and the palette search disappears. For a given glyph the best fg and bg are
+//! simply the mean colours under and outside its mask, and the cost is the
+//! variance left inside those two regions. A cell is a solid in its exact mean
+//! colour unless a half block removes enough error to be a visible edge.
 
-use crate::color::{dist2, dot, Palette, V3};
+use crate::color::{dist2, dot, linear_to_srgb, oklab_to_linear, Palette, V3};
 use crate::font::{self, CELL_H, CELL_PIXELS, CELL_W};
 use crate::source::Source;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Cell {
     pub ch: u8,
+    /// VGA palette indices. In truecolor mode these are the 16-colour fallback
+    /// for viewers that ignore 24-bit sequences.
     pub fg: u8,
     pub bg: u8,
+    /// Exact (fg, bg) sRGB colours, truecolor mode only.
+    pub rgb: Option<([u8; 3], [u8; 3])>,
 }
 
 impl Cell {
@@ -59,6 +70,8 @@ pub struct Options {
     /// Strength of the neighbour colour-coherence penalty (0 = single pass).
     pub coherence: f32,
     pub sweeps: u32,
+    /// 24-bit colours per cell instead of matching the 16-colour palette.
+    pub truecolor: bool,
 }
 
 const STRUCTURAL: [u8; 4] = [
@@ -165,9 +178,9 @@ fn solid_cell(colour: usize, ice: bool) -> Cell {
     // Dark colours are a space on that background. Bright ones need the full
     // block unless iCE colours make bright backgrounds available.
     if colour < 8 || ice {
-        Cell { ch: font::SPACE, fg: 7, bg: colour as u8 }
+        Cell { ch: font::SPACE, fg: 7, bg: colour as u8, rgb: None }
     } else {
-        Cell { ch: font::FULL_BLOCK, fg: colour as u8, bg: 0 }
+        Cell { ch: font::FULL_BLOCK, fg: colour as u8, bg: 0, rgb: None }
     }
 }
 
@@ -206,7 +219,7 @@ fn best_cell(
                         + penalty[b];
                     if cost < best_cost {
                         best_cost = cost;
-                        best = Cell { ch, fg: f as u8, bg: b as u8 };
+                        best = Cell { ch, fg: f as u8, bg: b as u8, rgb: None };
                     }
                 }
             }
@@ -226,11 +239,71 @@ fn best_cell(
         let (b, b_cost) = pick(&over, bg_count);
         if f != b && f_cost + b_cost < best_cost {
             best_cost = f_cost + b_cost;
-            best = Cell { ch, fg: f as u8, bg: b as u8 };
+            best = Cell { ch, fg: f as u8, bg: b as u8, rgb: None };
         }
     }
 
     best
+}
+
+impl Region {
+    /// Squared error left when the whole region is painted its own mean colour.
+    fn variance_sum(&self) -> f32 {
+        (self.sum_sq - dot(self.sum, self.sum) / self.n).max(0.0)
+    }
+}
+
+fn oklab_to_srgb8(lab: V3) -> [u8; 3] {
+    let lin = oklab_to_linear(lab);
+    [linear_to_srgb(lin[0]), linear_to_srgb(lin[1]), linear_to_srgb(lin[2])]
+}
+
+fn nearest_vga(pal: &Palette, lab: V3, count: usize) -> u8 {
+    (0..count)
+        .min_by(|&a, &b| dist2(pal.lab[a], lab).total_cmp(&dist2(pal.lab[b], lab)))
+        .unwrap() as u8
+}
+
+/// Error a half block must remove, per pixel, before it replaces a solid.
+/// Two halves that differ by d in Oklab gain about d^2/4, so this is d ~ 0.03:
+/// roughly where the step between them becomes visible.
+const TRUECOLOR_EDGE_GAIN: f32 = 0.0002;
+
+fn best_cell_truecolor(stats: &CellStats, pal: &Palette, opts: &Options) -> Cell {
+    let bg_count = if opts.ice { 16 } else { 8 };
+    let solid_cost = stats.all.variance_sum();
+
+    let mut best: Option<(u8, Region, Region)> = None;
+    let mut best_cost = solid_cost - TRUECOLOR_EDGE_GAIN * stats.all.n;
+    for (g, &ch) in STRUCTURAL.iter().enumerate() {
+        let under = stats.under[g];
+        let over = stats.all.minus(under);
+        let cost = under.variance_sum() + over.variance_sum();
+        if cost < best_cost {
+            best_cost = cost;
+            best = Some((ch, under, over));
+        }
+    }
+
+    match best {
+        Some((ch, under, over)) => {
+            let (f, b) = (under.mean(), over.mean());
+            Cell {
+                ch,
+                fg: nearest_vga(pal, f, 16),
+                bg: nearest_vga(pal, b, bg_count),
+                rgb: Some((oklab_to_srgb8(f), oklab_to_srgb8(b))),
+            }
+        }
+        None => {
+            let mean = stats.all.mean();
+            let colour = oklab_to_srgb8(mean);
+            Cell {
+                rgb: Some((colour, colour)),
+                ..solid_cell(nearest_vga(pal, mean, 16) as usize, opts.ice)
+            }
+        }
+    }
 }
 
 pub fn convert(src: &Source, cols: usize, rows: usize, pal: &Palette, opts: &Options) -> Vec<Cell> {
@@ -238,6 +311,13 @@ pub fn convert(src: &Source, cols: usize, rows: usize, pal: &Palette, opts: &Opt
     let stats: Vec<CellStats> = (0..rows * cols)
         .map(|i| cell_stats(src, i % cols, i / cols))
         .collect();
+
+    if opts.truecolor {
+        return stats
+            .iter()
+            .map(|s| best_cell_truecolor(s, pal, opts))
+            .collect();
+    }
 
     let no_penalty = [0.0f32; 16];
     let mut cells: Vec<Cell> = stats
