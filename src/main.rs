@@ -58,6 +58,16 @@ source prep
       --saturation <f>     chroma multiplier (default 1.0)
       --smooth <n>         edge-preserving smoothing passes (default 0)
       --no-levels          don't auto-stretch lightness to the full range
+      --auto-chroma <f>    lift muted colours until the most colourful parts
+                           reach this strength, so they land on real palette
+                           colours instead of grey (default 0.16, 0 = off)
+      --local-contrast <f> push shapes away from their surroundings in
+                           lightness (default 0.5, 0 = off)
+      --equalize <f>       spread bunched-up tones apart, 0..1 (default 0).
+                           Try 0.4 on dim, murky pictures; it can darken
+                           faces in pictures that are mostly bright.
+                           With --truecolor, auto-chroma and local-contrast
+                           default to off so colours stay exact.
 
 gif2ans compatibility
   -i, --image              also write a picture of the result to OUTPUT.ans.png
@@ -110,6 +120,9 @@ fn parse_args() -> Result<Args, String> {
         },
         prep: source::Prep {
             auto_levels: true,
+            auto_chroma: f32::NAN,
+            equalize: 0.0,
+            local_contrast: f32::NAN,
             contrast: 1.0,
             saturation: 1.0,
             smooth: 0,
@@ -146,6 +159,11 @@ fn parse_args() -> Result<Args, String> {
             "--saturation" => args.prep.saturation = num("--saturation", value("--saturation")?)?,
             "--smooth" => args.prep.smooth = num("--smooth", value("--smooth")?)?,
             "--no-levels" => args.prep.auto_levels = false,
+            "--auto-chroma" => args.prep.auto_chroma = num("--auto-chroma", value("--auto-chroma")?)?,
+            "--equalize" => args.prep.equalize = num("--equalize", value("--equalize")?)?,
+            "--local-contrast" => {
+                args.prep.local_contrast = num("--local-contrast", value("--local-contrast")?)?
+            }
             other if other.starts_with('-') => return Err(format!("unknown option {other}")),
             _ if args.input.is_empty() => args.input = arg,
             _ if args.out.is_none() => args.out = Some(arg),
@@ -154,6 +172,14 @@ fn parse_args() -> Result<Args, String> {
     }
     if args.input.is_empty() {
         return Err(String::new());
+    }
+    // Unset (NaN) means "the default for this colour mode". The palette fixes
+    // only make sense when there is a palette to fit.
+    if args.prep.auto_chroma.is_nan() {
+        args.prep.auto_chroma = if args.opts.truecolor { 0.0 } else { 0.16 };
+    }
+    if args.prep.local_contrast.is_nan() {
+        args.prep.local_contrast = if args.opts.truecolor { 0.0 } else { 0.5 };
     }
     if args.input.to_lowercase().ends_with(".ans") {
         return Err(format!(

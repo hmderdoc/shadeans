@@ -8,6 +8,13 @@ use image::{imageops::FilterType, ImageBuffer, Rgb};
 
 pub struct Prep {
     pub auto_levels: bool,
+    /// Chroma the image's most colourful pixels are lifted to (0 = off).
+    pub auto_chroma: f32,
+    /// Blend toward a flat lightness histogram, 0..1.
+    pub equalize: f32,
+    /// Strength of the wide-radius lightness boost that separates a shape
+    /// from its surroundings.
+    pub local_contrast: f32,
     pub contrast: f32,
     pub saturation: f32,
     /// Bilateral filter passes (0 = off).
@@ -50,15 +57,24 @@ pub fn prepare(rgba: &image::RgbaImage, cols: usize, rows: usize, prep: &Prep) -
 
     let mut lab: Vec<V3> = resized.pixels().map(|p| linear_to_oklab(p.0)).collect();
 
+    let (width, height) = (w as usize, h as usize);
     if prep.auto_levels {
         auto_levels(&mut lab);
+    }
+    if prep.equalize > 0.0 {
+        equalize(&mut lab, prep.equalize);
+    }
+    if prep.local_contrast > 0.0 {
+        local_contrast(&mut lab, width, height, prep.local_contrast);
+    }
+    if prep.auto_chroma > 0.0 {
+        auto_chroma(&mut lab, prep.auto_chroma);
     }
     for p in lab.iter_mut() {
         p[0] = 0.5 + (p[0] - 0.5) * prep.contrast;
         p[1] *= prep.saturation;
         p[2] *= prep.saturation;
     }
-    let (width, height) = (w as usize, h as usize);
     for _ in 0..prep.smooth {
         lab = bilateral(&lab, width, height);
     }
@@ -78,6 +94,108 @@ fn auto_levels(lab: &mut [V3]) {
     let scale = 1.0 / (hi - lo);
     for p in lab.iter_mut() {
         p[0] = (p[0] - lo) * scale;
+    }
+}
+
+/// The VGA palette has no muted colours: everything that isn't a grey is
+/// vivid. A muted green is therefore nearer to grey than to green, and whole
+/// regions lose their hue. Like auto-levels does for lightness, lift chroma so
+/// the image's most colourful pixels (95th percentile) reach `target`. Only
+/// ever boosts, and leaves near-greyscale images alone.
+///
+/// Near-neutral pixels are left out of the boost: a white wall with a faint
+/// cast should stay white, not turn blue.
+fn auto_chroma(lab: &mut [V3], target: f32) {
+    const MAX_BOOST: f32 = 1.8;
+    const NEUTRAL_BELOW: f32 = 0.02;
+    const FULL_BOOST_ABOVE: f32 = 0.06;
+    let mut chroma: Vec<f32> = lab.iter().map(|p| p[1].hypot(p[2])).collect();
+    chroma.sort_by(|a, b| a.total_cmp(b));
+    let p95 = chroma[chroma.len() * 95 / 100];
+    if p95 < NEUTRAL_BELOW || p95 >= target {
+        return;
+    }
+    let boost = (target / p95).min(MAX_BOOST);
+    for p in lab.iter_mut() {
+        let c = p[1].hypot(p[2]);
+        let t = ((c - NEUTRAL_BELOW) / (FULL_BOOST_ABOVE - NEUTRAL_BELOW)).clamp(0.0, 1.0);
+        let gain = 1.0 + (boost - 1.0) * t * t * (3.0 - 2.0 * t);
+        p[1] *= gain;
+        p[2] *= gain;
+    }
+}
+
+/// Partial, contrast-limited histogram equalisation of lightness. With only
+/// four greys to land on, an image whose tones bunch together collapses into
+/// one of them; this spreads the tones out so neighbouring regions reach
+/// different palette steps.
+///
+/// The histogram is clipped before it is integrated (as in CLAHE), which caps
+/// how steep the tone curve can get. Without that, a picture that is mostly
+/// bright background spends the whole range on the background and drags every
+/// midtone, faces included, down into the darks.
+fn equalize(lab: &mut [V3], amount: f32) {
+    const BINS: usize = 256;
+    const CLIP: f32 = 2.0;
+    let bin = |l: f32| ((l.clamp(0.0, 1.0) * (BINS - 1) as f32) as usize).min(BINS - 1);
+    let mut hist = [0.0f32; BINS];
+    for p in lab.iter() {
+        hist[bin(p[0])] += 1.0;
+    }
+    let limit = CLIP * lab.len() as f32 / BINS as f32;
+    let mut excess = 0.0;
+    for h in hist.iter_mut() {
+        if *h > limit {
+            excess += *h - limit;
+            *h = limit;
+        }
+    }
+    let share = excess / BINS as f32;
+    let mut total = 0.0;
+    for h in hist.iter_mut() {
+        total += *h + share;
+        *h = total;
+    }
+    for p in lab.iter_mut() {
+        let flat = hist[bin(p[0])] / total;
+        p[0] += (flat - p[0]) * amount;
+    }
+}
+
+/// Unsharp mask on lightness with a radius of a few cells: pushes a shape away
+/// from whatever surrounds it, the way a hand-drawn piece darkens a figure
+/// against a light ground.
+fn local_contrast(lab: &mut [V3], w: usize, h: usize, amount: f32) {
+    let sigma = 2.5 * CELL_W as f32;
+    let radius = (sigma * 2.5) as isize;
+    let kernel: Vec<f32> = (-radius..=radius)
+        .map(|d| (-((d * d) as f32) / (2.0 * sigma * sigma)).exp())
+        .collect();
+    let norm: f32 = kernel.iter().sum();
+
+    let blur_axis = |src: &[f32], horizontal: bool| -> Vec<f32> {
+        let mut out = vec![0.0f32; src.len()];
+        for y in 0..h as isize {
+            for x in 0..w as isize {
+                let mut acc = 0.0;
+                for (k, wgt) in kernel.iter().enumerate() {
+                    let d = k as isize - radius;
+                    let (xx, yy) = if horizontal {
+                        ((x + d).clamp(0, w as isize - 1), y)
+                    } else {
+                        (x, (y + d).clamp(0, h as isize - 1))
+                    };
+                    acc += src[yy as usize * w + xx as usize] * wgt;
+                }
+                out[y as usize * w + x as usize] = acc / norm;
+            }
+        }
+        out
+    };
+    let light: Vec<f32> = lab.iter().map(|p| p[0]).collect();
+    let blurred = blur_axis(&blur_axis(&light, true), false);
+    for (p, b) in lab.iter_mut().zip(blurred) {
+        p[0] = (p[0] + (p[0] - b) * amount).clamp(0.0, 1.0);
     }
 }
 
