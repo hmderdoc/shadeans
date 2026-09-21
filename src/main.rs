@@ -27,7 +27,10 @@ output
   -o, --out <file.ans>     same as giving OUTPUT.ans
       --no-sauce           omit the SAUCE record
       --title/--author/--group <text>   SAUCE fields
-      --force-newlines     CRLF after every row, even full 80-column rows
+      --force-newlines     CRLF after every row. Full-width rows normally get
+                           none, because viewers wrap at the width in the SAUCE
+                           record. Use this to show art narrower than the
+                           screen in a plain terminal, which knows no SAUCE.
 
 size
   -c, --cols <n>           columns (default 80); --columns also works

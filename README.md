@@ -52,10 +52,14 @@ full path of every file written is printed.
 | `--no-levels` | | don't stretch the source to the full black-to-white range |
 | `--no-sauce` | | leave off the SAUCE record |
 | `--title/--author/--group <text>` | | SAUCE fields (title defaults to the image name) |
-| `--force-newlines` | | CRLF after every row, even full 80-column rows |
+| `--force-newlines` | | CRLF after every row, see below |
 
-Full-width 80-column rows are written without a newline, as ANSI viewers wrap
-them on their own. Rows that end in black are trimmed and end with CRLF.
+Full-width rows are written without a newline at any width. ANSI viewers take
+their width from the SAUCE record and wrap there on their own, and many move to
+the next row the moment the last column is written, so a newline would leave a
+blank row after every line. Rows that end in black are trimmed and end with
+CRLF. If you show art that is narrower than the screen in a plain terminal,
+which knows nothing about SAUCE, use `--force-newlines`.
 
 ### Truecolor
 

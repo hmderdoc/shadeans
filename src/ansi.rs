@@ -129,9 +129,11 @@ pub fn encode(cells: &[Cell], cols: usize, rows: usize, force_newlines: bool) ->
             out.push(cell.ch);
         }
 
-        // A full 80-column row wraps by itself in ANSI viewers; a newline there
-        // would double-space the art.
-        if used < cols || cols != 80 || force_newlines {
+        // A full-width row wraps by itself: viewers take their width from the
+        // SAUCE record, and many move to the next row the moment the last
+        // column is written, so a newline there would double-space the art.
+        // Only rows trimmed short of the full width need one.
+        if used < cols || force_newlines {
             if cur_true.take().is_some() {
                 // Drop the 24-bit colours so the line break can't smear them.
                 out.extend_from_slice(b"\x1b[0m");

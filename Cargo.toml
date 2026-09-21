@@ -1,6 +1,6 @@
 [package]
 name = "shadeans"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Image to ANSI converter that shades with CP437 ramps instead of pixel-art half blocks"
 
